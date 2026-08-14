@@ -1,7 +1,14 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request
+)
+
 from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
@@ -9,8 +16,7 @@ from models import Student, Classroom
 from schemas import (
     StudentCreate,
     StudentUpdate,
-    StudentResponse,
-    APIResponse
+    StudentResponse
 )
 
 
@@ -20,25 +26,28 @@ router = APIRouter(
 )
 
 
-def response_data(
-    status_code,
-    message,
+def make_response(
+    status_code: int,
+    message: str,
     data,
-    path
+    error,
+    path: str
 ):
     return {
         "statusCode": status_code,
         "message": message,
         "data": data,
-        "error": None,
+        "error": error,
         "timestamp": datetime.now(
             timezone.utc
         ).isoformat(),
         "path": path
     }
 
-@router.get("")
+
+@router.get("/")
 def get_students(
+    request: Request,
     name: Optional[str] = Query(None),
     student_code: Optional[str] = Query(None),
     email: Optional[str] = Query(None),
@@ -47,16 +56,12 @@ def get_students(
 ):
     query = (
         db.query(Student)
-        .options(
-            joinedload(Student.classroom)
-        )
+        .options(joinedload(Student.classroom))
     )
 
     if name:
         query = query.filter(
-            Student.full_name.ilike(
-                f"%{name}%"
-            )
+            Student.full_name.ilike(f"%{name}%")
         )
 
     if student_code:
@@ -80,23 +85,31 @@ def get_students(
 
     students = query.all()
 
-    return response_data(
+    data = [
+        StudentResponse.model_validate(
+            student
+        ).model_dump()
+        for student in students
+    ]
+
+    return make_response(
         200,
         "Lấy danh sách sinh viên thành công",
-        students,
-        "/students"
+        data,
+        None,
+        request.url.path
     )
+
 
 @router.get("/{student_id}")
 def get_student(
     student_id: int,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     student = (
         db.query(Student)
-        .options(
-            joinedload(Student.classroom)
-        )
+        .options(joinedload(Student.classroom))
         .filter(Student.id == student_id)
         .first()
     )
@@ -107,32 +120,25 @@ def get_student(
             detail="Không tìm thấy sinh viên"
         )
 
-    return response_data(
+    data = StudentResponse.model_validate(
+        student
+    ).model_dump()
+
+    return make_response(
         200,
         "Lấy thông tin sinh viên thành công",
-        student,
-        f"/students/{student_id}"
+        data,
+        None,
+        request.url.path
     )
 
-@router.post(
-    "",
-    status_code=201
-)
+
+@router.post("", status_code=201)
 def create_student(
     student_data: StudentCreate,
+    request: Request,
     db: Session = Depends(get_db)
 ):
-    
-    if student_data.gender not in [
-        "male",
-        "female",
-        "other"
-    ]:
-        raise HTTPException(
-            status_code=400,
-            detail="Gender phải là male, female hoặc other"
-        )
-
     classroom = (
         db.query(Classroom)
         .filter(
@@ -206,31 +212,34 @@ def create_student(
     )
 
     db.add(student)
-
     db.commit()
-
     db.refresh(student)
 
     student = (
         db.query(Student)
-        .options(
-            joinedload(Student.classroom)
-        )
+        .options(joinedload(Student.classroom))
         .filter(Student.id == student.id)
         .first()
     )
 
-    return response_data(
+    data = StudentResponse.model_validate(
+        student
+    ).model_dump()
+
+    return make_response(
         201,
         "Thêm sinh viên thành công",
-        student,
-        "/students"
+        data,
+        None,
+        request.url.path
     )
+
 
 @router.put("/{student_id}")
 def update_student(
     student_id: int,
     student_data: StudentUpdate,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     student = (
@@ -245,24 +254,8 @@ def update_student(
             detail="Không tìm thấy sinh viên"
         )
 
-    # Gender
-    if (
-        student_data.gender is not None
-        and student_data.gender not in [
-            "male",
-            "female",
-            "other"
-        ]
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Gender không hợp lệ"
-        )
-
-    # Student code
     if student_data.student_code:
-
-        duplicate = (
+        duplicate_code = (
             db.query(Student)
             .filter(
                 Student.student_code
@@ -272,25 +265,23 @@ def update_student(
             .first()
         )
 
-        if duplicate:
+        if duplicate_code:
             raise HTTPException(
                 status_code=409,
                 detail="Mã sinh viên đã tồn tại"
             )
 
     if student_data.email:
-
-        duplicate = (
+        duplicate_email = (
             db.query(Student)
             .filter(
-                Student.email
-                == student_data.email,
+                Student.email == student_data.email,
                 Student.id != student_id
             )
             .first()
         )
 
-        if duplicate:
+        if duplicate_email:
             raise HTTPException(
                 status_code=409,
                 detail="Email đã tồn tại"
@@ -300,64 +291,66 @@ def update_student(
         student_data.class_id is not None
         and student_data.class_id != student.class_id
     ):
-        new_class = (
+        new_classroom = (
             db.query(Classroom)
             .filter(
-                Classroom.id
-                == student_data.class_id
+                Classroom.id == student_data.class_id
             )
             .first()
         )
 
-        if not new_class:
+        if not new_classroom:
             raise HTTPException(
                 status_code=404,
-                detail="Lớp mới không tồn tại"
+                detail="Lớp học mới không tồn tại"
             )
 
-        if new_class.status != "active":
+        if new_classroom.status != "active":
             raise HTTPException(
                 status_code=400,
-                detail="Lớp mới không hoạt động"
+                detail="Lớp học mới không hoạt động"
             )
 
-        count = (
+        new_class_count = (
             db.query(Student)
             .filter(
-                Student.class_id == new_class.id
+                Student.class_id
+                == new_classroom.id
             )
             .count()
         )
 
-        if count >= new_class.max_students:
+        if new_class_count >= new_classroom.max_students:
             raise HTTPException(
                 status_code=400,
-                detail="Lớp mới đã đủ số lượng"
+                detail="Lớp học mới đã đủ số lượng sinh viên"
             )
 
-    data = student_data.model_dump(
+    update_data = student_data.model_dump(
         exclude_unset=True
     )
 
-    for key, value in data.items():
+    for key, value in update_data.items():
         setattr(student, key, value)
 
     db.commit()
-
     db.refresh(student)
 
     student = (
         db.query(Student)
-        .options(
-            joinedload(Student.classroom)
-        )
+        .options(joinedload(Student.classroom))
         .filter(Student.id == student_id)
         .first()
     )
 
-    return response_data(
+    data = StudentResponse.model_validate(
+        student
+    ).model_dump()
+
+    return make_response(
         200,
         "Cập nhật sinh viên thành công",
-        student,
-        f"/students/{student_id}"
+        data,
+        None,
+        request.url.path
     )
